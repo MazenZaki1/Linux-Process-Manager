@@ -6,8 +6,27 @@
 #include <iomanip>   // for std::setw
 #include <fstream>   // for file operations
 #include <algorithm> // for all_of
-#include <sstream>  // for stringstream
+#include <sstream>   // for stringstream
+#include <pwd.h>     // for getpwuid
+#include <chrono>    // for std::chrono
+#include <thread>    // for std::this_thread
+#include <csignal>   // for signal handling
+
 using namespace std;
+
+bool running = true; // flag for controlling auto-refresh
+
+// signal handler for Ctrl+C
+void signalHandler(int signum)
+{
+    running = false;
+}
+
+// clear the screen function
+void clearScreen()
+{
+    cout << "\033[2J\033[1;1H"; // escape sequence to clear screen
+}
 
 class Process
 {
@@ -15,101 +34,141 @@ private:
     int pid;
     string name;
     int priority;
-    double cpuUsage;
     double memoryUsage;
     string status;
     string owner;
     int ppid;
-    double uTimeTicks;
-    double sTimeTicks;
+
+    string getUsernameFromUid(const string &uidStr)
+    {
+        try
+        {
+            uid_t uid = stoi(uidStr); // convert the uid to an integer
+            struct passwd *pw = getpwuid(uid); // get the user's name
+            if (pw != nullptr) // if the user's name is not null
+            {
+                return string(pw->pw_name); // return the user's name
+            }
+        }
+        catch (...)
+        {
+            // if conversion fails, return the original string
+        }
+        return "unknown";
+    }
+
+    double getTotalSystemMemory()
+    {
+        ifstream meminfo("/proc/meminfo"); // open the meminfo file
+        string line;
+        double totalMem = 0.0;
+        if (getline(meminfo, line))
+        {
+            stringstream ss(line); // create a stringstream object
+            string label;
+            ss >> label >> totalMem; // read the label and total memory
+        }
+        return totalMem; // return the total memory
+    }
 
     void fetchProcessDetails()
     {
         name = "N/A";
         priority = 0;
-        uTimeTicks = 0;
-        sTimeTicks = 0;
         memoryUsage = 0;
         status = '?';
         owner = "N/A";
         ppid = 0;
-        uid_t uid_num = -1;
-        string statusFilePath = "/proc/" + to_string(pid) + "/status"; // Fetch process details from /proc/[pid]/stat
-        ifstream statusFile(statusFilePath);
-        if (statusFile.is_open())
-        {
-            string line;
-            while (getline(statusFile, line))
-            {
-                if (line.find("Name:") == 0)
-                {
-                    name = line.substr(6); // Extract process name
-                }
-                else if (line.find("State:") == 0)
-                {
-                    status = line.substr(7); // Extract process status
-                }
-                else if (line.find("PPid:") == 0)
-                {
-                    ppid = stoi(line.substr(6)); // Extract parent process ID
-                }
-                else if (line.find("Uid:") == 0)
-                {
-                    owner = line.substr(6); // Extract owner UID
-                }
-                else if (line.find("VmRSS:") == 0)
-                {
-                    memoryUsage = stod(line.substr(7)); // Extract memory usage
-                }
-            }
-        }
-        statusFile.close();
 
+        // read process info from /proc/[pid]/stat
         string statFilePath = "/proc/" + to_string(pid) + "/stat";
         ifstream statFile(statFilePath);
         if (statFile.is_open())
         {
             string line;
             getline(statFile, line);
-            stringstream ss(line);
-            string token;
-            int fieldIndex = 0;
-            while (ss >> token)
+
+            // parse process stat line
+            size_t firstParen = line.find('(');
+            size_t lastParen = line.rfind(')');
+
+            if (firstParen != string::npos && lastParen != string::npos)
             {
-                if (fieldIndex == 18)
-                { // priority
-                    priority = stoi(token);
+                // Extract name
+                name = line.substr(firstParen + 1, lastParen - firstParen - 1);
+
+                // Extract other fields after the closing parenthesis
+                string rest = line.substr(lastParen + 2); // +2 to skip ') '
+                stringstream ss(rest);
+                string token;
+
+                // Read tokens up to utime (14th field after name)
+                char state;
+                ss >> state; // 3: Process state
+                status = state;
+
+                ss >> ppid; // 4: Parent PID
+
+                // Skip to priority (18th field)
+                for (int i = 5; i <= 17; i++)
+                {
+                    if (!(ss >> token))
+                    {
+                        break;
+                    }
                 }
-                else if (fieldIndex == 14)
-                { // uTime
-                    uTimeTicks = stod(token);
-                }
-                else if (fieldIndex == 15)
-                { // sTime
-                    sTimeTicks = stod(token);
-                }
-                fieldIndex++;
+
+                ss >> priority; // 18: priority
             }
         }
         statFile.close();
+
+        // Read memory info from /proc/[pid]/status
+        string statusFilePath = "/proc/" + to_string(pid) + "/status";
+        ifstream statusFile(statusFilePath);
+        if (statusFile.is_open())
+        {
+            string line;
+            while (getline(statusFile, line))
+            {
+                if (line.find("Uid:") == 0)
+                {
+                    // extract the first UID
+                    string uidStr = line.substr(5);
+                    size_t tabPos = uidStr.find('\t');
+                    if (tabPos != string::npos)
+                    {
+                        uidStr = uidStr.substr(0, tabPos);
+                    }
+                    owner = getUsernameFromUid(uidStr);
+                }
+                else if (line.find("VmRSS:") == 0)
+                {
+                    double memKB = stod(line.substr(7));
+                    double totalMem = getTotalSystemMemory();
+                    if (totalMem > 0)
+                    {
+                        memoryUsage = (memKB / totalMem) * 100.0;
+                    }
+                }
+            }
+        }
+        statusFile.close();
     }
 
 public:
     explicit Process(int p) : pid(p)
     {
-        fetchProcessDetails(); // Populate data immediately
+        fetchProcessDetails();
     }
 
     int getPID() const { return pid; }
     const string &getName() const { return name; }
-    // CPU % getter needs calculation elsewhere based on ticks
-    size_t getMemoryUsage() const { return memoryUsage; } // In KB
+    double getMemoryUsage() const { return memoryUsage; }
     const string &getOwner() const { return owner; }
     int getParentPID() const { return ppid; }
     const string &getStatus() const { return status; }
     int getPriority() const { return priority; }
-    unsigned long getUserTimeTicks() const { return uTimeTicks; }
-    unsigned long getSystemTimeTicks() const { return sTimeTicks; }
 };
 
 bool isNumeric(const string &s)
@@ -142,7 +201,7 @@ vector<unique_ptr<Process>> findProcesses()
                 int pid = stoi(dirName); // convert to int
                 if (pid > 0)
                 {
-                    processesFound.push_back(unique_ptr<Process>(new Process(pid))); // C++11 way // create a new Process object and add it to the vector
+                    processesFound.push_back(unique_ptr<Process>(new Process(pid))); // create a new Process object and add it to the vector
                 }
             }
         }
@@ -153,10 +212,9 @@ vector<unique_ptr<Process>> findProcesses()
 
 void displayProcesses(const vector<unique_ptr<Process>> &processList)
 {
-    // Print header
     cout << left; // Left-align columns
     cout << setw(8) << "PID" << setw(25) << "Name"
-         << setw(12) << "Memory(KB)" << setw(10) << "Owner"
+         << setw(12) << "Memory(%)" << setw(10) << "Owner"
          << setw(8) << "PPID" << setw(8) << "Status"
          << setw(10) << "Priority" << endl;
     cout << string(81, '-') << endl; // Adjust width as needed
@@ -165,16 +223,15 @@ void displayProcesses(const vector<unique_ptr<Process>> &processList)
     for (const auto &procPtr : processList)
     {
         if (!procPtr)
-            continue; // Should not happen with make_unique, but safe check
+            continue; // safe check just incase
 
         cout << setw(8) << procPtr->getPID()
-             << setw(25) << procPtr->getName().substr(0, 24) // Truncate name if needed
-             << setw(12) << procPtr->getMemoryUsage()
+             << setw(25) << procPtr->getName().substr(0, 24)
+             << fixed << setprecision(1) << setw(12) << procPtr->getMemoryUsage()
              << setw(10) << procPtr->getOwner().substr(0, 9)
              << setw(8) << procPtr->getParentPID()
              << setw(8) << procPtr->getStatus()
              << setw(10) << procPtr->getPriority()
-             // Add CPU% later once calculated
              << endl;
     }
     cout << string(81, '-') << endl;
@@ -184,24 +241,31 @@ void displayProcesses(const vector<unique_ptr<Process>> &processList)
 
 int main()
 {
+    // Register signal handler for Ctrl+C
+    signal(SIGINT, signalHandler);
+
     cout << "--- Simple Linux Process Lister ---" << endl;
 
-    // 1. Get the initial list of processes
+    // get the initial list of processes
     cout << "Fetching process list..." << endl;
     vector<unique_ptr<Process>> currentProcesses = findProcesses();
 
     if (currentProcesses.empty())
     {
-        cerr << "No processes found or error reading /proc." << endl;
-        return 1; // Indicate error
+        cout << "No processes found or error reading /proc." << endl;
+        return 1;
     }
 
-    // 2. Display the list
+    // display the list
     cout << "Displaying processes..." << endl;
     displayProcesses(currentProcesses);
 
-    // 3. Basic command loop placeholder (as required by project spec)
-    cout << "Enter command (e.g., 'refresh', 'exit'):" << endl;
+    cout << "Enter command (e.g., 'refresh', 'auto', 'exit'):" << endl;
+    cout << " - 'refresh': Update process list once" << endl;
+    cout << " - 'auto 2': Auto-refresh every 2 seconds (Ctrl+C to stop)" << endl;
+    cout << " - 'sort': Sort the process list by memory/priority/pid/ppid/name" << endl;
+    cout << " - 'exit': Quit the program" << endl;
+
     string command;
     while (true)
     {
@@ -221,20 +285,150 @@ int main()
             currentProcesses = findProcesses(); // Get updated list
             displayProcesses(currentProcesses); // Display updated list
         }
+        else if (command.substr(0, 4) == "auto")
+        {
+            int interval = 2; // Default interval in seconds
+
+            if (command.length() > 5)
+            {
+                try
+                {
+                    interval = stoi(command.substr(5));
+                    if (interval < 1)
+                        interval = 1; // Minimum 1 second
+                }
+                catch (...)
+                {
+                    cout << "Invalid interval. Using default 2 seconds." << endl;
+                }
+            }
+
+            cout << "Auto-refreshing every " << interval << " seconds. Press Ctrl+C to stop." << endl;
+            running = true;
+
+            while (running)
+            {
+                clearScreen();
+                cout << "--- Auto-refreshing (every " << interval << "s) - Press Ctrl+C to stop ---" << endl;
+                currentProcesses = findProcesses();
+                displayProcesses(currentProcesses);
+
+                // Sleep for the specified interval
+                this_thread::sleep_for(chrono::seconds(interval));
+            }
+
+            cout << "Auto-refresh stopped." << endl;
+        }
         else if (command == "help")
         {
             cout << "Available commands:\n";
             cout << "  refresh - Reload and display the process list.\n";
+            cout << "  auto [seconds] - Automatically refresh the process list every [seconds] seconds.\n";
+            cout << "  sort    - Sort the process list by memory/priority/pid/ppid/name.\n";
             cout << "  exit    - Quit the program.\n";
-            // Add help for sort, filter, kill later
         }
-        // --- Add handlers for sort, filter, group, kill commands here ---
-        // else if (command.substr(0, 8) == "sort cpu") { ... }
-        // else if (command.substr(0, 8) == "sort mem") { ... }
-        // else if (command.substr(0, 6) == "filter") { ... }
-        // else if (command.substr(0, 4) == "kill") { ... }
-        // else if (command == "group parent") { ... }
-        // else if (command == "group owner") { ... }
+        else if (command == "sort")
+        {
+            string sortBy;
+            char ascOrDesc;
+            string sortedBy;
+            cout << "Sort by: (memory/priority/pid/ppid/name) " << endl;
+            cin >> sortBy;
+            cout << "Ascending or Descending? (a/d)" << endl;
+            cin >> ascOrDesc;
+
+            if (sortBy == "memory")
+            {
+                if (ascOrDesc == 'a')
+                {
+                    cout << "Sorting processes by memory usage in ascending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getMemoryUsage() < b->getMemoryUsage(); });
+                    sortedBy = "Displayed processes in ascending order of memory usage.";
+                }
+                else if (ascOrDesc == 'd')
+                {
+                    cout << "Sorting processes by memory usage in descending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getMemoryUsage() > b->getMemoryUsage(); });
+                    sortedBy = "Displayed processes in descending order of memory usage.";
+                }
+            }
+            else if (sortBy == "priority")
+            {
+                if (ascOrDesc == 'a')
+                {
+                    cout << "Sorting processes by priority in ascending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getPriority() < b->getPriority(); });
+                    sortedBy = "Displayed processes in ascending order of priority.";
+                }
+                else if (ascOrDesc == 'd')
+                {
+                    cout << "Sorting processes by priority in descending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getPriority() > b->getPriority(); });
+                    sortedBy = "Displayed processes in descending order of priority.";
+                }
+            }
+            else if (sortBy == "pid")
+            {
+                if (ascOrDesc == 'a')
+                {
+                    cout << "Sorting processes by PID in ascending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getPID() < b->getPID(); });
+                    sortedBy = "Displayed processes in ascending order of PID.";
+                }
+                else if (ascOrDesc == 'd')
+                {
+                    cout << "Sorting processes by PID in descending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getPID() > b->getPID(); });
+                    sortedBy = "Displayed processes in descending order of PID.";
+                }
+            }
+            else if (sortBy == "ppid")
+            {
+                if (ascOrDesc == 'a')
+                {
+                    cout << "Sorting processes by PPID in ascending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getParentPID() < b->getParentPID(); });
+                    sortedBy = "Displayed processes in ascending order of PPID.";
+                }
+                else if (ascOrDesc == 'd')
+                {
+                    cout << "Sorting processes by PPID in descending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getParentPID() > b->getParentPID(); });
+                    sortedBy = "Displayed processes in descending order of PPID.";
+                }
+            }
+            else if (sortBy == "name")
+            {
+                if (ascOrDesc == 'a')
+                {
+                    cout << "Sorting processes by name in ascending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getName() < b->getName(); });
+                    sortedBy = "Displayed processes in ascending order of name.";
+                }
+                else if (ascOrDesc == 'd')
+                {
+                    cout << "Sorting processes by name in descending order..." << endl;
+                    sort(currentProcesses.begin(), currentProcesses.end(), [](const unique_ptr<Process> &a, const unique_ptr<Process> &b)
+                         { return a->getName() > b->getName(); });
+                    sortedBy = "Displayed processes in descending order of name.";
+                }
+            }
+            else
+            {
+                cout << "Invalid sort option. Please try again." << endl;
+            }
+            displayProcesses(currentProcesses);
+            cout << sortedBy << endl;
+        }
         else if (!command.empty())
         {
             cout << "Unknown command: '" << command << "'. Type 'help' for options." << endl;
@@ -242,5 +436,5 @@ int main()
     }
 
     cout << "Exiting LPM." << endl;
-    return 0; // Indicate successful execution
+    return 0;
 }
