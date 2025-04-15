@@ -262,7 +262,7 @@ int main()
 
     cout << "Enter command (e.g., 'refresh', 'auto', 'exit'):" << endl;
     cout << " - 'refresh': Update process list once" << endl;
-    cout << " - 'auto 2': Auto-refresh every 2 seconds (Ctrl+C to stop)" << endl;
+    cout << " - 'auto [interval]': Auto-refresh every [interval] seconds (Ctrl+C to stop)" << endl;
     cout << " - 'sort': Sort the process list by memory/priority/pid/ppid/name" << endl;
     cout << " - 'exit': Quit the program" << endl;
 
