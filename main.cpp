@@ -11,19 +11,16 @@
 #include <chrono>    // for std::chrono
 #include <thread>    // for std::this_thread
 #include <csignal>   // for signal handling
-
+#include <unistd.h>  // to get the number of clock ticks per second
 using namespace std;
 
-bool running = true; // flag for controlling auto-refresh
-
-// signal handler for Ctrl+C
-void signalHandler(int signum)
+bool running = true;           // flag for controlling auto-refresh
+void signalHandler(int signum) // signal handler for Ctrl+C
 {
     running = false;
 }
 
-// clear the screen function
-void clearScreen()
+void clearScreen() // clear the screen function
 {
     cout << "\033[2J\033[1;1H"; // escape sequence to clear screen
 }
@@ -38,21 +35,30 @@ private:
     string status;
     string owner;
     int ppid;
+    unsigned long utimePrevious;
+    unsigned long stimePrevious;
+    unsigned long utimeCurrent;
+    unsigned long stimeCurrent;
+    double cpuUsage;
+    static long clk_tck;
+    static int num_cpus;
+    static unsigned long prevTotalJiffies;
+    static unsigned long prevBusyJiffies;
 
     string getUsernameFromUid(const string &uidStr)
     {
         try
         {
-            uid_t uid = stoi(uidStr); // convert the uid to an integer
+            uid_t uid = stoi(uidStr);          // convert the uid to an integer
             struct passwd *pw = getpwuid(uid); // get the user's name
-            if (pw != nullptr) // if the user's name is not null
+            if (pw != nullptr)                 // if the user's name is not null
             {
                 return string(pw->pw_name); // return the user's name
             }
         }
         catch (...)
         {
-            // if conversion fails, return the original string
+            cout << "Error converting UID to integer or getting username." << endl;
         }
         return "unknown";
     }
@@ -71,6 +77,22 @@ private:
         return totalMem; // return the total memory
     }
 
+    int getCpuCount()
+    {
+        ifstream cpuinfo("/proc/cpuinfo");
+        string line;
+        int cpuCount = 0;
+
+        while (getline(cpuinfo, line))
+        {
+            if (line.find("processor") == 0)
+            {
+                cpuCount++;
+            }
+        }
+        return cpuCount > 0 ? cpuCount : 1;
+    }
+
     void fetchProcessDetails()
     {
         name = "N/A";
@@ -79,6 +101,9 @@ private:
         status = '?';
         owner = "N/A";
         ppid = 0;
+        cpuUsage = 0.0;
+        utimePrevious = utimeCurrent;
+        stimePrevious = stimeCurrent;
 
         // read process info from /proc/[pid]/stat
         string statFilePath = "/proc/" + to_string(pid) + "/stat";
@@ -109,8 +134,8 @@ private:
 
                 ss >> ppid; // 4: Parent PID
 
-                // Skip to priority (18th field)
-                for (int i = 5; i <= 17; i++)
+                // Skip to priority (14th field)
+                for (int i = 5; i <= 13; i++)
                 {
                     if (!(ss >> token))
                     {
@@ -118,7 +143,11 @@ private:
                     }
                 }
 
-                ss >> priority; // 18: priority
+                ss >> utimeCurrent; // 14: user time
+                ss >> stimeCurrent; // 15: system time
+                ss >> token;        // 16: cutime
+                ss >> token;        // 17: cstime
+                ss >> priority;     // 18: priority
             }
         }
         statFile.close();
@@ -241,8 +270,7 @@ void displayProcesses(const vector<unique_ptr<Process>> &processList)
 
 int main()
 {
-    // Register signal handler for Ctrl+C
-    signal(SIGINT, signalHandler);
+    signal(SIGINT, signalHandler); // Register signal handler for Ctrl+C
 
     cout << "--- Simple Linux Process Lister ---" << endl;
 
@@ -274,7 +302,6 @@ int main()
         { // Handle potential input errors or EOF
             break;
         }
-
         if (command == "exit")
         {
             break;
@@ -429,12 +456,90 @@ int main()
             displayProcesses(currentProcesses);
             cout << sortedBy << endl;
         }
+        else if (command == "filter")
+        {
+            vector<Process*> filteredProcesses;
+            string filterBy;
+            cout << "Filter by: (memory/priority/name/owner) " << endl;
+            cin >> filterBy;
+
+            if (filterBy == "memory")
+            {
+                double threshold;
+                cout << "Enter memory usage threshold (%) as a decimal (e.g., 0.5 for 0.5%): ";
+                cin >> threshold;
+
+                // Create a vector of raw pointers for filtered view
+                for (const auto &proc : currentProcesses)
+                {
+                    if (proc->getMemoryUsage() > threshold)
+                    {
+                        filteredProcesses.push_back(proc.get());
+                    }
+                }
+            }
+            else if (filterBy == "priority")
+            {
+                int threshold;
+                cout << "Enter priority threshold: ";
+                cin >> threshold;
+
+                // Create a vector of raw pointers for filtered view
+                for (const auto &proc : currentProcesses)
+                {
+                    if (proc->getPriority() > threshold)
+                    {
+                        filteredProcesses.push_back(proc.get());
+                    }
+                }
+            }
+            else if (filterBy == "name")
+            {
+                string nameFilter;
+                cout << "Enter name filter: ";
+                cin >> nameFilter;
+
+                // Create a vector of raw pointers for filtered view
+                for (const auto &proc : currentProcesses)
+                {
+                    if (proc->getName().find(nameFilter) != string::npos)
+                    {
+                        filteredProcesses.push_back(proc.get());
+                    }
+                }
+            }
+            else if (filterBy == "owner")
+            {
+                string ownerFilter;
+                cout << "Enter owner filter: ";
+                cin >> ownerFilter;
+
+                // Create a vector of raw pointers for filtered view
+                for (const auto &proc : currentProcesses)
+                {
+                    if (proc->getOwner().find(ownerFilter) != string::npos)
+                    {
+                        filteredProcesses.push_back(proc.get());
+                    }
+                }
+            }
+            else
+            {
+                cout << "Invalid filter option. Please try again." << endl;
+                continue;
+            }
+            vector<unique_ptr<Process>> tempProcesses;
+            for (Process* proc : filteredProcesses) {
+                tempProcesses.push_back(unique_ptr<Process>(new Process(*proc)));
+            }
+            displayProcesses(tempProcesses);
+            cout << "Filtered processes displayed." << endl;
+        }
         else if (!command.empty())
         {
             cout << "Unknown command: '" << command << "'. Type 'help' for options." << endl;
         }
     }
-
     cout << "Exiting LPM." << endl;
     return 0;
 }
