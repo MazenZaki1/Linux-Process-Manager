@@ -12,6 +12,9 @@
 #include <thread>    // for std::this_thread
 #include <csignal>   // for signal handling
 #include <unistd.h>  // to get the number of clock ticks per second
+#include <map>
+#include <functional>
+
 using namespace std;
 
 bool running = true;           // flag for controlling auto-refresh
@@ -293,6 +296,15 @@ int main()
     cout << " - 'auto [interval]': Auto-refresh every [interval] seconds (Ctrl+C to stop)" << endl;
     cout << " - 'sort': Sort the process list by memory/priority/pid/ppid/name" << endl;
     cout << " - 'exit': Quit the program" << endl;
+    cout << " - 'filter': Filter processes by memory/priority/name/owner" << endl;
+    cout << " - 'terminate': Terminate a process by PID" << endl;
+    cout << " - 'group': Group processes by owner or parent PID" << endl;
+    cout << " - 'expand owner [name]': Expand to show processes owned by [name]" << endl;
+    cout << " - 'expand pid [pid]': Expand to show children of PID [pid]" << endl;
+    cout << " - 'help': Show this help message" << endl;
+    cout << "-------------------------------------" << endl;
+    cout << "Type 'help' for available commands." << endl;
+    cout << "-------------------------------------" << endl;
 
     string command;
     while (true)
@@ -353,6 +365,15 @@ int main()
             cout << "  auto [seconds] - Automatically refresh the process list every [seconds] seconds.\n";
             cout << "  sort    - Sort the process list by memory/priority/pid/ppid/name.\n";
             cout << "  exit    - Quit the program.\n";
+            cout << "  filter  - Filter processes by memory/priority/name/owner.\n";
+            cout << "  terminate - Terminate a process by PID.\n";
+            cout << "  group   - Group processes by owner or parent PID.\n";
+            cout << "  expand owner [name] - Expand to show processes owned by [name].\n";
+            cout << "  expand pid [pid] - Expand to show children of PID [pid].\n";
+            cout << "  help    - Show this help message.\n";
+            cout << "-------------------------------------" << endl;
+            cout << "Type 'help' for available commands." << endl;
+            cout << "-------------------------------------" << endl;
         }
         else if (command == "sort")
         {
@@ -458,7 +479,7 @@ int main()
         }
         else if (command == "filter")
         {
-            vector<Process*> filteredProcesses;
+            vector<Process *> filteredProcesses;
             string filterBy;
             cout << "Filter by: (memory/priority/name/owner) " << endl;
             cin >> filterBy;
@@ -529,11 +550,132 @@ int main()
                 continue;
             }
             vector<unique_ptr<Process>> tempProcesses;
-            for (Process* proc : filteredProcesses) {
+            for (Process *proc : filteredProcesses)
+            {
                 tempProcesses.push_back(unique_ptr<Process>(new Process(*proc)));
             }
             displayProcesses(tempProcesses);
             cout << "Filtered processes displayed." << endl;
+        }
+        else if (command == "terminate")
+        {
+            int pidToTerminate;
+            cout << "Enter PID to terminate: ";
+            cin >> pidToTerminate;
+
+            if (kill(pidToTerminate, SIGTERM) == 0)
+            {
+                cout << "Process " << pidToTerminate << " terminated with SIGTERM." << endl;
+            }
+            else
+            {
+                perror("SIGTERM failed");
+                cout << "Do you want to force kill the process using SIGKILL (kill -9)? (y/n): ";
+                char choice;
+                cin >> choice;
+                if (choice == 'y' || choice == 'Y')
+                {
+                    if (kill(pidToTerminate, SIGKILL) == 0)
+                    {
+                        cout << "Process " << pidToTerminate << " forcefully terminated with SIGKILL." << endl;
+                    }
+                    else
+                    {
+                        perror("SIGKILL also failed");
+                    }
+                }
+                else
+                {
+                    cout << "Process was not forcefully terminated." << endl;
+                }
+            }
+        }
+        else if (command == "group")
+        {
+            cout << "Group by (owner/parent): ";
+            string groupType;
+            cin >> groupType;
+
+            if (groupType == "owner")
+            {
+                map<string, vector<Process *>> ownerGroups;
+                for (const auto &proc : currentProcesses)
+                {
+                    ownerGroups[proc->getOwner()].push_back(proc.get());
+                }
+
+                cout << "Grouped by owner:\n\n";
+                for (const auto &[owner, group] : ownerGroups)
+                {
+                    cout << "[+] " << owner << " (" << group.size() << " processes)" << endl;
+                }
+                cout << "\nType 'expand owner [name]' to view details.\n";
+            }
+            else if (groupType == "parent")
+            {
+                map<int, vector<Process *>> parentMap;
+                for (const auto &proc : currentProcesses)
+                {
+                    parentMap[proc->getParentPID()].push_back(proc.get());
+                }
+
+                cout << "Grouped by parent PID:\n\n";
+                for (const auto &[ppid, group] : parentMap)
+                {
+                    cout << "[+] PID " << ppid << " (" << group.size() << " children)" << endl;
+                }
+                cout << "\nType 'expand pid [pid]' to view children.\n";
+            }
+            else
+            {
+                cout << "Invalid group type. Use 'owner' or 'parent'." << endl;
+            }
+        }
+        else if (command.substr(0, 13) == "expand owner ")
+        {
+            string ownerName = command.substr(13);
+            map<string, vector<Process *>> ownerGroups;
+            for (const auto &proc : currentProcesses)
+            {
+                ownerGroups[proc->getOwner()].push_back(proc.get());
+            }
+
+            if (ownerGroups.find(ownerName) != ownerGroups.end())
+            {
+                cout << "\nProcesses owned by: " << ownerName << "\n";
+                for (const auto *proc : ownerGroups[ownerName])
+                {
+                    cout << "  PID " << proc->getPID() << " | Name: " << proc->getName()
+                         << " | PPID: " << proc->getParentPID() << endl;
+                }
+            }
+            else
+            {
+                cout << "Owner group not found." << endl;
+            }
+        }
+        else if (command.substr(0, 11) == "expand pid ")
+        {
+            int parentPid = stoi(command.substr(11));
+            map<int, vector<Process *>> parentMap;
+            for (const auto &proc : currentProcesses)
+            {
+                parentMap[proc->getParentPID()].push_back(proc.get());
+            }
+
+            if (parentMap.find(parentPid) != parentMap.end())
+            {
+                cout << "\nChildren of PID " << parentPid << ":\n";
+                for (const auto *proc : parentMap[parentPid])
+                {
+                    cout << "  PID " << proc->getPID() << " | Name: " << proc->getName()
+                         << " | Owner: " << proc->getOwner() << endl;
+                }
+            }
+            else
+            {
+                cout << "No children found for PID " << parentPid << "." << endl;
+            }
         }
         else if (!command.empty())
         {
