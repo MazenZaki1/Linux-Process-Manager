@@ -6,6 +6,8 @@
     "ostream": "cpp",
     "thread": "cpp",
     "unordered_map": "cpp",
-    "iosfwd": "cpp"
+    "iosfwd": "cpp",
+    "type_traits": "cpp",
+    "fstream": "cpp"
   }
 }
