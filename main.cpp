@@ -108,49 +108,55 @@ private:
         utimePrevious = utimeCurrent;
         stimePrevious = stimeCurrent;
 
+        long clk_tck = sysconf(_SC_CLK_TCK); // clock ticks per second
+
         // read process info from /proc/[pid]/stat
         string statFilePath = "/proc/" + to_string(pid) + "/stat";
         ifstream statFile(statFilePath);
-        if (statFile.is_open())
+        string statLine;
+        if (getline(statFile, statLine))
         {
-            string line;
-            getline(statFile, line);
-
-            // parse process stat line
-            size_t firstParen = line.find('(');
-            size_t lastParen = line.rfind(')');
+            size_t firstParen = statLine.find('(');
+            size_t lastParen = statLine.rfind(')');
 
             if (firstParen != string::npos && lastParen != string::npos)
             {
                 // Extract name
-                name = line.substr(firstParen + 1, lastParen - firstParen - 1);
+                name = statLine.substr(firstParen + 1, lastParen - firstParen - 1);
 
-                // Extract other fields after the closing parenthesis
-                string rest = line.substr(lastParen + 2); // +2 to skip ') '
+                // Extract tokens after ')'
+                string rest = statLine.substr(lastParen + 2);
                 stringstream ss(rest);
+                vector<string> values;
                 string token;
 
-                // Read tokens up to utime (14th field after name)
-                char state;
-                ss >> state; // 3: Process state
-                status = state;
+                while (ss >> token)
+                    values.push_back(token);
 
-                ss >> ppid; // 4: Parent PID
-
-                // Skip to priority (14th field)
-                for (int i = 5; i <= 13; i++)
+                if (values.size() >= 22)
                 {
-                    if (!(ss >> token))
+                    status = values[0][0];                       // 3rd field: process state
+                    ppid = stoi(values[1]);                      // 4th field: parent PID
+                    utimeCurrent = stoul(values[11]);            // 14th field
+                    stimeCurrent = stoul(values[12]);            // 15th field
+                    priority = stoi(values[16]);                 // 18th field
+                    unsigned long starttime = stoul(values[19]); // 22nd field
+
+                    // Read uptime from /proc/uptime
+                    ifstream uptimeFile("/proc/uptime");
+                    string uptimeLine;
+                    if (getline(uptimeFile, uptimeLine))
                     {
-                        break;
+                        stringstream uptimeStream(uptimeLine);
+                        double uptimeSeconds = 0.0;
+                        uptimeStream >> uptimeSeconds;
+
+                        double total_time = utimeCurrent + stimeCurrent;
+                        double seconds = uptimeSeconds - (starttime / (double)clk_tck);
+                        if (seconds > 0)
+                            cpuUsage = 100.0 * ((total_time / clk_tck) / seconds);
                     }
                 }
-
-                ss >> utimeCurrent; // 14: user time
-                ss >> stimeCurrent; // 15: system time
-                ss >> token;        // 16: cutime
-                ss >> token;        // 17: cstime
-                ss >> priority;     // 18: priority
             }
         }
         statFile.close();
@@ -165,7 +171,6 @@ private:
             {
                 if (line.find("Uid:") == 0)
                 {
-                    // extract the first UID
                     string uidStr = line.substr(5);
                     size_t tabPos = uidStr.find('\t');
                     if (tabPos != string::npos)
@@ -201,6 +206,7 @@ public:
     int getParentPID() const { return ppid; }
     const string &getStatus() const { return status; }
     int getPriority() const { return priority; }
+    double getCPUUsage() const { return cpuUsage; }
 };
 
 bool isNumeric(const string &s)
@@ -248,7 +254,7 @@ void displayProcesses(const vector<unique_ptr<Process>> &processList)
     cout << setw(8) << "PID" << setw(25) << "Name"
          << setw(12) << "Memory(%)" << setw(10) << "Owner"
          << setw(8) << "PPID" << setw(8) << "Status"
-         << setw(10) << "Priority" << endl;
+         << setw(10) << "Priority" << setw(10) << "CPU(%)" << endl;
     cout << string(81, '-') << endl; // Adjust width as needed
 
     // Print each process
@@ -264,6 +270,7 @@ void displayProcesses(const vector<unique_ptr<Process>> &processList)
              << setw(8) << procPtr->getParentPID()
              << setw(8) << procPtr->getStatus()
              << setw(10) << procPtr->getPriority()
+            << setw(10) << procPtr->getCPUUsage() << "%"
              << endl;
     }
     cout << string(81, '-') << endl;
